@@ -1,8 +1,8 @@
 # DB Incident Replay
 
-**A local-first PostgreSQL incident investigation lab for DBAs and database support engineers.**
+**A local-first PostgreSQL incident flight recorder for DBAs and database support engineers.**
 
-DB Incident Replay connects a small Python API and browser dashboard to a local PostgreSQL instance and displays selected live diagnostic evidence, including active sessions, blocking relationships, and connection counts. It can also save manually triggered, timestamped diagnostic snapshots to a local SQLite history store. The included SQL scripts let you reproduce a blocking incident safely in a disposable local database.
+DB Incident Replay connects a small Python API and browser dashboard to a local PostgreSQL instance and displays selected live diagnostic evidence, including active sessions, blocking relationships, and connection counts. It also samples selected signals automatically at a configurable interval and saves manually triggered, timestamped diagnostic snapshots to a local SQLite history store. The included SQL scripts let you reproduce a blocking incident safely in a disposable local database.
 
 > **Project status:** learning/portfolio prototype. This version is not production-ready, is not a complete monitoring platform, and does not reconstruct past incidents unless evidence was captured at the time. Findings are diagnostic clues—not guaranteed root-cause conclusions.
 
@@ -16,15 +16,20 @@ PostgreSQL support engineers often need to turn symptoms such as slow queries or
 - Browser-based dashboard.
 - Read-only diagnostic queries for current activity, blocking relationships, and connection counts.
 - Evidence-backed guidance for some lock scenarios.
-- Manual timestamped snapshots of diagnostic findings, activity, locks and connection counts.
-- Persistent local incident history with snapshot details and saved evidence JSON.
+- Automatic read-only polling (default 15 seconds) for sessions, blockers, long-running queries, long idle-in-transaction sessions, connection distribution, and selected database counters.
+- Local SQLite retention of automatic samples for 7 days; manual evidence snapshots are retained separately.
+- Threshold-based incident events that open when a sampled condition appears and close when it clears.
+- Dashboard with session trends, current signals, blocker relationships, query tables, connection distribution, database counters, and event timeline.
+- Manual timestamped evidence snapshots with query/activity/lock/connection evidence and saved JSON.
+- Explicit thresholds configurable through `.env`.
 - SQL lab scripts for a reproducible lock incident.
 - Setup and troubleshooting instructions for macOS/Linux and Windows.
 
 ## Not implemented in this version
 
-- Automatic periodic evidence collection or true historical replay. Snapshots are captured only when the user clicks **Capture evidence**.
-- Timeline correlation across multiple snapshots or automatic change detection.
+- PostgreSQL server-log ingestion. Failed SQL statements are not reliably available after completion from `pg_stat_activity`; see [`docs/postgres-logging.md`](docs/postgres-logging.md) for the server-side logging configuration required before building a log parser.
+- Complete historical replay. Polling can miss short events between samples and is not a complete audit trail.
+- Snapshot-to-snapshot comparison or automated root-cause determination.
 - Full query-performance root-cause analysis.
 - Server-wide connection exhaustion detection in every deployment configuration.
 - Automated integration with `pg_cron`, pgBadger, pgBackRest, or a Flight Recorder extension.
@@ -35,10 +40,11 @@ PostgreSQL support engineers often need to turn symptoms such as slow queries or
 
 ```mermaid
 flowchart TD
-    A[Browser dashboard] -->|HTTP to localhost| B[FastAPI diagnostic API]
+    A[Browser dashboard] -->|HTTP to localhost| B[FastAPI API + background collector]
     B -->|Read-only SQL| C[(Local PostgreSQL: incident_lab)]
-    D[SQL incident lab scripts] --> C
-    B --> E[Current findings and next-step hints]
+    B --> D[(Local SQLite samples, events and snapshots)]
+    E[SQL incident lab scripts] --> C
+    B --> F[Signals, timeline and evidence views]
 ```
 
 The browser does not connect directly to PostgreSQL. The Python API uses database credentials from a local `.env` file. Keep this prototype bound to `127.0.0.1` and never expose it to the internet.
@@ -67,7 +73,7 @@ The browser does not connect directly to PostgreSQL. The Python API uses databas
    python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
    ```
 
-7. Open [http://127.0.0.1:8000](http://127.0.0.1:8000) and click **Run diagnostics**.
+7. Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The automatic collector starts by default; the dashboard shows collector status and the last successful sample.
 8. Optional API documentation: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
 ### Windows PowerShell
@@ -89,17 +95,36 @@ Follow the complete procedure in [`docs/incident-scenarios.md`](docs/incident-sc
 2. In Session A, run `BEGIN;` and update `demo_accounts.account_id = 1`. Leave the transaction open.
 3. In Session B, update the same row. It should wait for Session A.
 4. Click **Run diagnostics** in the dashboard while Session B is waiting.
-5. Enter an optional incident title such as `LAB-001 blocking test`, then click **Capture evidence**.
-6. Open **Incident history**, click **Refresh history**, and select **View** on the new snapshot. Verify that the saved finding and blocker/blocked evidence are present.
-7. Run `COMMIT;` in Session A and capture another snapshot to compare the before/after evidence.
-5. Compare the blocker and blocked PIDs with the independent SQL verification query in the scenario guide.
-6. Run `COMMIT;` in Session A and confirm Session B finishes.
+5. Check the **Blocking** tab and **Incident timeline** while Session B is waiting. The background collector should capture the condition if it persists across a polling interval.
+6. Enter an optional incident title such as `LAB-001 blocking test`, then click **Capture evidence**.
+7. Open **Evidence history** and select **View** on the new snapshot. Verify that the saved finding and blocker/blocked evidence are present.
+8. Run `COMMIT;` in Session A and confirm Session B finishes. The timeline should mark the blocking signal cleared after a subsequent successful sample.
+9. Compare the blocker and blocked PIDs with the independent SQL verification query in the scenario guide.
 
-## Timestamped evidence and incident history
+## Automatic sampling and incident history (v0.4)
 
-The **Capture evidence** button runs the current diagnostic checks and stores a snapshot with a UTC timestamp, database name, optional title/notes, findings, lock rows, activity rows, and connection counts. Snapshots are stored locally in `data/incident_history.sqlite3` and remain available after restarting the API. The dashboard lists the latest 100 snapshots and can display the stored JSON evidence.
+- The background collector runs every `MONITOR_INTERVAL_SECONDS` (default 15; minimum 10 seconds) when `AUTO_MONITOR=true`.
+- Long-running active query threshold: `LONG_QUERY_SECONDS` (default 30 seconds).
+- Long idle-in-transaction threshold: `IDLE_TXN_SECONDS` (default 60 seconds).
+- Automatic samples are retained for 7 days in `data/incident_history.sqlite3`; older samples are pruned during successful collection. Manual snapshots and event history are not pruned automatically in this version.
+- The timeline opens an event when a sampled signal first appears and marks it cleared when the signal disappears in a later sample.
+- The **Capture evidence** button stores an extra named snapshot and notes, including current diagnostic payload.
+- API status: `/api/monitor/status`; latest sample: `/api/monitor/latest`; sample list: `/api/monitor/history`; events: `/api/events`.
 
-This is manual, point-in-time capture—not a background collector. It cannot recover activity from before the first snapshot. SQL text and connection metadata may be sensitive, so keep the SQLite history file private and do not commit or share it without review/redaction. The `data/` history database is excluded by `.gitignore`.
+Example `.env` options:
+
+```dotenv
+AUTO_MONITOR=true
+MONITOR_INTERVAL_SECONDS=15
+LONG_QUERY_SECONDS=30
+IDLE_TXN_SECONDS=60
+```
+
+## Important: failed statements and complete incident evidence
+
+This version does **not** ingest PostgreSQL server logs. `pg_stat_activity` is a live view; it cannot reliably show a statement that failed and disappeared before the next poll. To preserve failed SQL, errors, slow statements and lock-wait evidence, configure PostgreSQL server logging and then build a deployment-specific, access-controlled log ingestion layer. Start with [`docs/postgres-logging.md`](docs/postgres-logging.md). Log contents may include sensitive literals; do not turn on verbose logging or publish logs without a retention and redaction policy.
+
+Automatic samples preserve observed states after the collector starts, but cannot recover activity from before startup or reliably catch events shorter than the polling interval. Manual snapshots add a named investigation checkpoint. SQL text and connection metadata may be sensitive, so keep the SQLite history file private and do not commit or share it without review/redaction. The `data/` history database is excluded by `.gitignore`.
 
 ## Other local scenarios
 

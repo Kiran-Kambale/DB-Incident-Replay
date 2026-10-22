@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sqlite3
@@ -16,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-app = FastAPI(title="DB Incident Replay - Local Lab", version="0.3.0")
+app = FastAPI(title="DB Incident Replay - Local Lab", version="0.4.0")
 HISTORY_DIR = ROOT / "data"
 HISTORY_DB = HISTORY_DIR / "incident_history.sqlite3"
 
@@ -35,6 +36,29 @@ def init_history() -> None:
                 payload_json TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS monitor_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                captured_at TEXT NOT NULL,
+                database_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS incident_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                severity TEXT NOT NULL,
+                title TEXT NOT NULL,
+                details_json TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_samples_captured ON monitor_samples(captured_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_started ON incident_events(started_at)")
 
 
 init_history()
@@ -63,6 +87,209 @@ def query(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
                 return list(cur.fetchall())
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Database query failed: {exc}") from exc
+
+
+MONITOR_INTERVAL_SECONDS = max(10, int(os.getenv("MONITOR_INTERVAL_SECONDS", "15")))
+LONG_QUERY_SECONDS = max(1, int(os.getenv("LONG_QUERY_SECONDS", "30")))
+IDLE_TXN_SECONDS = max(1, int(os.getenv("IDLE_TXN_SECONDS", "60")))
+MONITOR_TASK: asyncio.Task | None = None
+MONITOR_STATE: dict[str, Any] = {"running": False, "last_sample_at": None, "last_error": None, "interval_seconds": MONITOR_INTERVAL_SECONDS}
+
+
+def collect_monitor_payload() -> dict[str, Any]:
+    """Read-only sample. Query text is evidence and may contain sensitive literals."""
+    h = query("SELECT current_database() AS database, now() AS checked_at, pg_postmaster_start_time() AS server_started_at")
+    activity_sql = """
+        SELECT pid, usename, application_name, client_addr, state,
+               wait_event_type, wait_event,
+               CASE WHEN query_start IS NOT NULL THEN now() - query_start END AS query_duration,
+               CASE WHEN xact_start IS NOT NULL THEN now() - xact_start END AS transaction_age,
+               query_start, xact_start, backend_start,
+               left(query, 1500) AS query
+        FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()
+        ORDER BY query_start NULLS LAST LIMIT 250
+    """
+    acts = query(activity_sql)
+    lock_data = locks()
+    conn_data = connections()
+    long_queries = query("""
+        SELECT pid, usename, application_name, client_addr, state,
+               now() - query_start AS query_duration, wait_event_type, wait_event,
+               left(query, 1500) AS query
+        FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()
+          AND state = 'active' AND query_start < now() - (%s * interval '1 second')
+        ORDER BY query_start ASC LIMIT 100
+    """, (LONG_QUERY_SECONDS,))
+    idle_txns = query("""
+        SELECT pid, usename, application_name, client_addr, state,
+               now() - xact_start AS transaction_age,
+               now() - state_change AS state_age, wait_event_type, wait_event,
+               left(query, 1500) AS query
+        FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()
+          AND state IN ('idle in transaction', 'idle in transaction (aborted)')
+          AND xact_start < now() - (%s * interval '1 second')
+        ORDER BY xact_start ASC LIMIT 100
+    """, (IDLE_TXN_SECONDS,))
+    db_stats = query("""
+        SELECT datname, numbackends, xact_commit, xact_rollback, blks_read,
+               blks_hit, round(100.0 * blks_hit / NULLIF(blks_hit + blks_read, 0), 2) AS cache_hit_pct,
+               temp_files, pg_size_pretty(temp_bytes) AS temp_bytes_pretty,
+               deadlocks, conflicts, stats_reset
+        FROM pg_stat_database WHERE datname = current_database()
+    """)
+    findings = []
+    if lock_data["count"]:
+        findings.append({"key":"blocking", "severity":"critical", "title":f"{lock_data['count']} blocking relationship(s)", "count":lock_data["count"], "details":lock_data["items"][:10]})
+    if long_queries:
+        findings.append({"key":"long_queries", "severity":"warning", "title":f"{len(long_queries)} long-running active quer(ies)", "count":len(long_queries), "details":long_queries[:10]})
+    if idle_txns:
+        findings.append({"key":"idle_transactions", "severity":"warning", "title":f"{len(idle_txns)} long idle transaction(s)", "count":len(idle_txns), "details":idle_txns[:10]})
+    util = conn_data.get("utilization_percent")
+    if util is not None and util >= 80:
+        findings.append({"key":"connections_high", "severity":"warning", "title":f"Connection utilization at {util}%", "count":util, "details":conn_data})
+    return json_safe({"database":h[0]["database"], "checked_at":h[0]["checked_at"], "server_started_at":h[0]["server_started_at"],
+        "activity":{"count":len(acts),"items":acts}, "locks":lock_data, "connections":conn_data,
+        "long_queries":{"threshold_seconds":LONG_QUERY_SECONDS,"count":len(long_queries),"items":long_queries},
+        "idle_transactions":{"threshold_seconds":IDLE_TXN_SECONDS,"count":len(idle_txns),"items":idle_txns},
+        "database_stats":db_stats[0] if db_stats else {}, "findings":findings,
+        "failed_query_note":"Failed statements are not reliably available from pg_stat_activity after they finish. PostgreSQL error logging must be configured separately to retain failed SQL evidence."})
+
+
+def persist_monitor_sample(payload: dict[str, Any]) -> None:
+    captured_at = str(payload["checked_at"])
+    database_name = str(payload["database"])
+    status = "alert" if payload.get("findings") else "ok"
+    active_keys = {f["key"]: f for f in payload.get("findings", [])}
+    with sqlite3.connect(HISTORY_DB) as conn:
+        conn.execute("INSERT INTO monitor_samples(captured_at,database_name,status,payload_json) VALUES(?,?,?,?)",
+                     (captured_at, database_name, status, json.dumps(payload)))
+        # Create an event when a condition first appears; close it when it clears.
+        existing = conn.execute("SELECT event_key FROM incident_events WHERE active=1").fetchall()
+        existing_keys = {row[0] for row in existing}
+        for key, finding in active_keys.items():
+            if key not in existing_keys:
+                conn.execute("INSERT INTO incident_events(event_key,started_at,severity,title,details_json,active) VALUES(?,?,?,?,?,1)",
+                    (key, captured_at, finding["severity"], finding["title"], json.dumps(finding)))
+            else:
+                conn.execute("UPDATE incident_events SET title=?, severity=?, details_json=? WHERE event_key=? AND active=1",
+                    (finding["title"], finding["severity"], json.dumps(finding), key))
+        for key in existing_keys - set(active_keys):
+            conn.execute("UPDATE incident_events SET active=0, ended_at=? WHERE event_key=? AND active=1", (captured_at, key))
+        # Seven-day local retention for high-frequency samples; events and manual snapshots remain.
+        conn.execute("DELETE FROM monitor_samples WHERE julianday(captured_at) < julianday('now','-7 days')")
+
+
+async def monitor_loop() -> None:
+    MONITOR_STATE["running"] = True
+    while True:
+        try:
+            payload = await asyncio.to_thread(collect_monitor_payload)
+            await asyncio.to_thread(persist_monitor_sample, payload)
+            MONITOR_STATE["last_sample_at"] = str(payload["checked_at"])
+            MONITOR_STATE["last_error"] = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            MONITOR_STATE["last_error"] = str(exc)[:500]
+        await asyncio.sleep(MONITOR_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def start_monitor() -> None:
+    global MONITOR_TASK
+    if os.getenv("AUTO_MONITOR", "true").lower() in ("1", "true", "yes", "on"):
+        MONITOR_TASK = asyncio.create_task(monitor_loop())
+
+
+@app.on_event("shutdown")
+async def stop_monitor() -> None:
+    global MONITOR_TASK
+    if MONITOR_TASK:
+        MONITOR_TASK.cancel()
+        try:
+            await MONITOR_TASK
+        except asyncio.CancelledError:
+            pass
+        MONITOR_TASK = None
+    MONITOR_STATE["running"] = False
+
+
+@app.get("/api/monitor/status")
+def monitor_status():
+    return {**MONITOR_STATE, "auto_monitor_enabled": os.getenv("AUTO_MONITOR", "true").lower() in ("1", "true", "yes", "on"),
+            "long_query_seconds": LONG_QUERY_SECONDS, "idle_transaction_seconds": IDLE_TXN_SECONDS,
+            "retention_days": 7, "note": "Polling samples are local observations, not a complete audit trail. Failed statements require PostgreSQL server logging."}
+
+
+@app.get("/api/monitor/latest")
+def monitor_latest():
+    with sqlite3.connect(HISTORY_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT id,captured_at,database_name,status,payload_json FROM monitor_samples ORDER BY id DESC LIMIT 1").fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No automatic samples yet. Check database connectivity and monitor status.")
+    result = dict(row); result["payload"] = json.loads(result.pop("payload_json")); return result
+
+
+@app.get("/api/monitor/history")
+def monitor_history(limit: int = 100):
+    limit = min(max(limit, 1), 500)
+    with sqlite3.connect(HISTORY_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT id,captured_at,database_name,status,payload_json FROM monitor_samples ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    items=[]
+    for row in rows:
+        item=dict(row)
+        try:
+            payload=json.loads(item.pop("payload_json"))
+            item["sessions"]=payload.get("connections",{}).get("total_sessions",0)
+            item["blocking_count"]=payload.get("locks",{}).get("count",0)
+            item["long_query_count"]=payload.get("long_queries",{}).get("count",0)
+        except Exception:
+            item["sessions"]=0; item["blocking_count"]=0; item["long_query_count"]=0
+        items.append(item)
+    return {"count":len(items), "items":items}
+
+
+@app.get("/api/events")
+def incident_events(limit: int = 100):
+    limit = min(max(limit, 1), 500)
+    with sqlite3.connect(HISTORY_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT id,event_key,started_at,ended_at,severity,title,details_json,active FROM incident_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    items=[]
+    for row in rows:
+        item=dict(row); item["details"]=json.loads(item.pop("details_json")); items.append(item)
+    return {"count":len(items),"items":items}
+
+
+@app.get("/api/diagnostics/long-queries")
+def diagnostics_long_queries():
+    rows = query("""
+        SELECT pid, usename, application_name, client_addr, state,
+               now() - query_start AS query_duration, wait_event_type, wait_event,
+               left(query, 1500) AS query
+        FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()
+          AND state='active' AND query_start < now() - (%s * interval '1 second')
+        ORDER BY query_start ASC LIMIT 100
+    """, (LONG_QUERY_SECONDS,))
+    return {"threshold_seconds":LONG_QUERY_SECONDS,"count":len(rows),"items":rows}
+
+
+@app.get("/api/diagnostics/idle-transactions")
+def diagnostics_idle_transactions():
+    rows = query("""
+        SELECT pid, usename, application_name, client_addr, state,
+               now()-xact_start AS transaction_age, now()-state_change AS state_age,
+               wait_event_type, wait_event, left(query,1500) AS query
+        FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()
+          AND state IN ('idle in transaction','idle in transaction (aborted)')
+        ORDER BY xact_start NULLS LAST LIMIT 100
+    """)
+    return {"threshold_seconds": IDLE_TXN_SECONDS, "count":len(rows),"items":rows}
 
 
 @app.get("/")
@@ -202,6 +429,10 @@ def capture_snapshot(request: CaptureRequest):
         l = locks()
         a = activity()
         c = connections()
+        try:
+            monitor_evidence = collect_monitor_payload()
+        except Exception as monitor_exc:
+            monitor_evidence = {"collection_error": str(monitor_exc)[:500]}
         captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         title = request.title.strip() or f"Snapshot {captured_at.replace('T', ' ')}"
         payload = json_safe({
@@ -211,7 +442,8 @@ def capture_snapshot(request: CaptureRequest):
             "locks": l,
             "activity": a,
             "connections": c,
-            "limitations": "Point-in-time sample only. This does not reconstruct events before capture. Query text may contain sensitive values; keep this local database private and review/redact before sharing."
+            "monitor_evidence": monitor_evidence,
+            "limitations": "Snapshot includes point-in-time evidence only. Automatic polling can preserve sampled states but can miss events shorter than the interval. Failed statements require PostgreSQL server error logging. Query text may contain sensitive values; keep this local database private and review/redact before sharing."
         })
         with sqlite3.connect(HISTORY_DB) as conn:
             cur = conn.execute(
