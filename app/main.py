@@ -1,4 +1,7 @@
+import json
 import os
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -6,13 +9,35 @@ import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-app = FastAPI(title="DB Incident Replay - Local Lab", version="0.1.0")
+app = FastAPI(title="DB Incident Replay - Local Lab", version="0.3.0")
+HISTORY_DIR = ROOT / "data"
+HISTORY_DB = HISTORY_DIR / "incident_history.sqlite3"
+
+
+def init_history() -> None:
+    """Create local-only storage for timestamped diagnostic snapshots."""
+    HISTORY_DIR.mkdir(exist_ok=True)
+    with sqlite3.connect(HISTORY_DB) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                captured_at TEXT NOT NULL,
+                database_name TEXT NOT NULL,
+                title TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL
+            )
+        """)
+
+
+init_history()
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -156,3 +181,74 @@ def summary():
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+class CaptureRequest(BaseModel):
+    title: str = Field(default="", max_length=120)
+    notes: str = Field(default="", max_length=1000)
+
+
+def json_safe(value: Any) -> Any:
+    """Convert PostgreSQL date/time and interval values to JSON-safe strings."""
+    return json.loads(json.dumps(value, default=str))
+
+
+@app.post("/api/history/capture")
+def capture_snapshot(request: CaptureRequest):
+    """Collect a point-in-time diagnostic snapshot and persist it locally."""
+    try:
+        h = health()
+        s = summary()
+        l = locks()
+        a = activity()
+        c = connections()
+        captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        title = request.title.strip() or f"Snapshot {captured_at.replace('T', ' ')}"
+        payload = json_safe({
+            "captured_at": captured_at,
+            "database": h["database"],
+            "summary": s,
+            "locks": l,
+            "activity": a,
+            "connections": c,
+            "limitations": "Point-in-time sample only. This does not reconstruct events before capture. Query text may contain sensitive values; keep this local database private and review/redact before sharing."
+        })
+        with sqlite3.connect(HISTORY_DB) as conn:
+            cur = conn.execute(
+                "INSERT INTO snapshots (captured_at, database_name, title, notes, payload_json) VALUES (?, ?, ?, ?, ?)",
+                (captured_at, h["database"], title, request.notes.strip(), json.dumps(payload))
+            )
+            snapshot_id = cur.lastrowid
+        return {"id": snapshot_id, "captured_at": captured_at, "database": h["database"], "title": title,
+                "message": "Snapshot saved to local incident history.", "note": payload["limitations"]}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not capture snapshot: {exc}") from exc
+
+
+@app.get("/api/history")
+def list_history():
+    """Return saved snapshot metadata, newest first."""
+    with sqlite3.connect(HISTORY_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, captured_at, database_name, title, notes FROM snapshots ORDER BY id DESC LIMIT 100"
+        ).fetchall()
+    return {"count": len(rows), "items": [dict(row) for row in rows]}
+
+
+@app.get("/api/history/{snapshot_id}")
+def get_snapshot(snapshot_id: int):
+    """Return one saved snapshot, including its evidence payload."""
+    with sqlite3.connect(HISTORY_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT id, captured_at, database_name, title, notes, payload_json FROM snapshots WHERE id = ?",
+            (snapshot_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    result = dict(row)
+    result["payload"] = json.loads(result.pop("payload_json"))
+    return result

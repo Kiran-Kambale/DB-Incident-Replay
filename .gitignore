@@ -18,3 +18,6 @@ __pycache__/
 
 # Local artifacts
 *.log
+
+# Local incident evidence can contain SQL text and connection metadata
+data/

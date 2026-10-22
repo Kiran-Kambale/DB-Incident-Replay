@@ -2,7 +2,7 @@
 
 **A local-first PostgreSQL incident investigation lab for DBAs and database support engineers.**
 
-DB Incident Replay connects a small Python API and browser dashboard to a local PostgreSQL instance and displays selected live diagnostic evidence, including active sessions, blocking relationships, and connection counts. The included SQL scripts let you reproduce a blocking incident safely in a disposable local database.
+DB Incident Replay connects a small Python API and browser dashboard to a local PostgreSQL instance and displays selected live diagnostic evidence, including active sessions, blocking relationships, and connection counts. It can also save manually triggered, timestamped diagnostic snapshots to a local SQLite history store. The included SQL scripts let you reproduce a blocking incident safely in a disposable local database.
 
 > **Project status:** learning/portfolio prototype. This version is not production-ready, is not a complete monitoring platform, and does not reconstruct past incidents unless evidence was captured at the time. Findings are diagnostic clues—not guaranteed root-cause conclusions.
 
@@ -16,12 +16,15 @@ PostgreSQL support engineers often need to turn symptoms such as slow queries or
 - Browser-based dashboard.
 - Read-only diagnostic queries for current activity, blocking relationships, and connection counts.
 - Evidence-backed guidance for some lock scenarios.
+- Manual timestamped snapshots of diagnostic findings, activity, locks and connection counts.
+- Persistent local incident history with snapshot details and saved evidence JSON.
 - SQL lab scripts for a reproducible lock incident.
 - Setup and troubleshooting instructions for macOS/Linux and Windows.
 
 ## Not implemented in this version
 
-- Persistent incident snapshots/history or true historical replay.
+- Automatic periodic evidence collection or true historical replay. Snapshots are captured only when the user clicks **Capture evidence**.
+- Timeline correlation across multiple snapshots or automatic change detection.
 - Full query-performance root-cause analysis.
 - Server-wide connection exhaustion detection in every deployment configuration.
 - Automated integration with `pg_cron`, pgBadger, pgBackRest, or a Flight Recorder extension.
@@ -86,8 +89,17 @@ Follow the complete procedure in [`docs/incident-scenarios.md`](docs/incident-sc
 2. In Session A, run `BEGIN;` and update `demo_accounts.account_id = 1`. Leave the transaction open.
 3. In Session B, update the same row. It should wait for Session A.
 4. Click **Run diagnostics** in the dashboard while Session B is waiting.
+5. Enter an optional incident title such as `LAB-001 blocking test`, then click **Capture evidence**.
+6. Open **Incident history**, click **Refresh history**, and select **View** on the new snapshot. Verify that the saved finding and blocker/blocked evidence are present.
+7. Run `COMMIT;` in Session A and capture another snapshot to compare the before/after evidence.
 5. Compare the blocker and blocked PIDs with the independent SQL verification query in the scenario guide.
 6. Run `COMMIT;` in Session A and confirm Session B finishes.
+
+## Timestamped evidence and incident history
+
+The **Capture evidence** button runs the current diagnostic checks and stores a snapshot with a UTC timestamp, database name, optional title/notes, findings, lock rows, activity rows, and connection counts. Snapshots are stored locally in `data/incident_history.sqlite3` and remain available after restarting the API. The dashboard lists the latest 100 snapshots and can display the stored JSON evidence.
+
+This is manual, point-in-time capture—not a background collector. It cannot recover activity from before the first snapshot. SQL text and connection metadata may be sensitive, so keep the SQLite history file private and do not commit or share it without review/redaction. The `data/` history database is excluded by `.gitignore`.
 
 ## Other local scenarios
 
@@ -112,7 +124,7 @@ See [`docs/troubleshooting.md`](docs/troubleshooting.md) for common errors inclu
 
 ## Roadmap
 
-Priorities and current status are documented in [`docs/roadmap.md`](docs/roadmap.md). The recommended next milestone is timestamped evidence snapshots and an incident history view.
+Priorities and current status are documented in [`docs/roadmap.md`](docs/roadmap.md). The current milestone includes manual timestamped snapshots and an incident history view. The next milestone is optional periodic collection, snapshot comparison and a chronological incident timeline, with retention controls and redaction.
 
 ## Demo evidence for your portfolio
 
