@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 import asyncio
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-app = FastAPI(title="DB Incident Replay - Local Lab", version="0.4.0")
+app = FastAPI(title="DB Incident Replay - Local Lab", version="0.5.0")
 HISTORY_DIR = ROOT / "data"
 HISTORY_DB = HISTORY_DIR / "incident_history.sqlite3"
 
@@ -266,6 +268,108 @@ def incident_events(limit: int = 100):
         item=dict(row); item["details"]=json.loads(item.pop("details_json")); items.append(item)
     return {"count":len(items),"items":items}
 
+
+
+# PostgreSQL server-log ingestion (v0.5)
+LOG_RECORD_RE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)"
+    r"(?:\s+[A-Z]{2,5})?\s+\[(?P<pid>\d+)\]\s+user=(?P<user>.*?) db=(?P<database>.*?)"
+    r" app=(?P<application>.*?) client=(?P<client>.*?)"
+    r"\s+(?P<level>[A-Z]+):\s*(?P<message>.*)$"
+)
+LOG_TAIL_BYTES = max(65536, min(int(os.getenv("PG_LOG_TAIL_BYTES", "2097152")), 10485760))
+
+
+def _active_postgres_log_path() -> tuple[Path, str]:
+    """Resolve the active PostgreSQL log, preferring an explicit local override."""
+    override = os.getenv("PG_LOG_FILE", "").strip()
+    if override:
+        return Path(override).expanduser().resolve(), "PG_LOG_FILE override"
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_current_logfile() AS log_file, current_setting('data_directory') AS data_directory")
+            row = cur.fetchone()
+    if not row or not row.get("log_file"):
+        raise RuntimeError("PostgreSQL has not reported an active log file. Check logging_collector and log_destination.")
+
+    log_file = Path(str(row["log_file"]))
+    if not log_file.is_absolute():
+        log_file = Path(str(row["data_directory"])) / log_file
+    return log_file.resolve(), "pg_current_logfile()"
+
+
+def _parse_failed_log_entries(log_text: str, limit: int = 100) -> list[dict[str, Any]]:
+    """Parse ERROR/FATAL/PANIC records and their following DETAIL/HINT/STATEMENT lines."""
+    parsed_lines: list[dict[str, str]] = []
+    for line in log_text.splitlines():
+        match = LOG_RECORD_RE.match(line)
+        if match:
+            parsed_lines.append(match.groupdict())
+
+    items: list[dict[str, Any]] = []
+    latest_error_by_pid: dict[str, dict[str, Any]] = {}
+    for entry in parsed_lines:
+        level = entry["level"]
+        pid = entry["pid"]
+        if level in ("ERROR", "FATAL", "PANIC"):
+            item: dict[str, Any] = {
+                "timestamp": entry["timestamp"],
+                "pid": int(pid),
+                "user": entry["user"] or None,
+                "database": entry["database"] or None,
+                "application": entry["application"] or None,
+                "client": entry["client"] or None,
+                "severity": level,
+                "message": entry["message"],
+                "detail": None,
+                "hint": None,
+                "statement": None,
+            }
+            items.append(item)
+            latest_error_by_pid[pid] = item
+        elif level in ("DETAIL", "HINT", "STATEMENT"):
+            target = latest_error_by_pid.get(pid)
+            if target is not None:
+                field = {"DETAIL": "detail", "HINT": "hint", "STATEMENT": "statement"}[level]
+                # Keep the first matching auxiliary record to avoid overwriting useful context.
+                if not target.get(field):
+                    target[field] = entry["message"]
+
+    return list(reversed(items[-limit:]))
+
+
+@app.get("/api/diagnostics/failed-queries")
+def diagnostics_failed_queries(limit: int = 100):
+    """Read recent failed statements from the active PostgreSQL stderr log."""
+    limit = min(max(limit, 1), 200)
+    try:
+        log_path, source = _active_postgres_log_path()
+        if not log_path.is_file():
+            return {
+                "status": "unavailable", "ingestion_enabled": False, "count": 0, "items": [],
+                "source": source, "log_file": log_path.name,
+                "warning": "The active PostgreSQL log file could not be found by the application process. Check the path and file permissions.",
+            }
+        with log_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - LOG_TAIL_BYTES), os.SEEK_SET)
+            raw = handle.read()
+        text = raw.decode("utf-8", errors="replace")
+        items = _parse_failed_log_entries(text, limit=limit)
+        return {
+            "status": "ok", "ingestion_enabled": True, "count": len(items), "items": items,
+            "source": source, "log_file": log_path.name,
+            "bytes_scanned": len(raw), "tail_truncated": size > len(raw),
+            "warning": "Reads the current log file only and scans its recent tail. Log rotation, older files, multiline statements, and permission differences may limit results. SQL text may contain sensitive literals; keep this endpoint local and private.",
+        }
+    except Exception as exc:
+        # Do not expose a full filesystem path or connection details in the UI response.
+        return {
+            "status": "unavailable", "ingestion_enabled": False, "count": 0, "items": [],
+            "source": "PostgreSQL server log", "warning": str(exc)[:400],
+        }
 
 @app.get("/api/diagnostics/long-queries")
 def diagnostics_long_queries():

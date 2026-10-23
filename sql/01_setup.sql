@@ -5,6 +5,9 @@ CREATE DATABASE incident_lab;
 CREATE ROLE incident_reader LOGIN PASSWORD 'change_this_local_password';
 GRANT CONNECT ON DATABASE incident_lab TO incident_reader;
 GRANT pg_read_all_stats TO incident_reader;
+-- v0.5 local failed-SQL log discovery permissions. Review before using outside a lab.
+GRANT pg_monitor TO incident_reader;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_current_logfile() TO incident_reader;
 
 CREATE TABLE IF NOT EXISTS public.demo_accounts (
   account_id integer PRIMARY KEY,

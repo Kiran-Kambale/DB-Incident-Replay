@@ -1,6 +1,6 @@
 # PostgreSQL server logging: failed queries and incident evidence
 
-DB Incident Replay v0.4 does not currently read PostgreSQL server log files. The automatic collector polls live views; a failed query can disappear from `pg_stat_activity` immediately, so polling alone cannot preserve the failed statement.
+DB Incident Replay v0.5 can read the recent tail of the active PostgreSQL server log for failed-SQL evidence. The automatic collector polls live views; a failed query can disappear from `pg_stat_activity` immediately, so polling alone cannot preserve the failed statement.
 
 ## Recommended local-lab starting point
 
@@ -43,3 +43,10 @@ log_line_prefix = '%m [%p] db=%d,user=%u,app=%a,client=%h '
 3. Run a deliberate harmless error in the local lab, such as `SELECT 1 / 0;`, and verify the corresponding log record exists.
 4. Run a query that exceeds the configured duration and verify the slow-query entry.
 5. Confirm log file access is restricted before considering any integration with DB Incident Replay.
+
+
+## v0.5 local log ingestion and permissions
+
+The application exposes `GET /api/diagnostics/failed-queries`. It asks PostgreSQL for `pg_current_logfile()` and `data_directory`, reads only the recent tail of the current log, and parses `ERROR`, `FATAL`, and `PANIC` records plus nearby `DETAIL`, `HINT`, and `STATEMENT` entries. The API database login may require `pg_monitor` membership and EXECUTE permission on `pg_catalog.pg_current_logfile()`; the local example setup SQL includes these grants. Review their scope before granting them outside a disposable lab. If auto-discovery is unavailable, set `PG_LOG_FILE` in the local `.env` to an absolute path readable by the app process. `PG_LOG_TAIL_BYTES` controls the scan size (default 2 MiB, maximum 10 MiB).
+
+This is a local prototype, not a complete audit trail: it does not ingest rotated logs, persist parsed errors separately, or guarantee association for every multiline statement. Do not expose this endpoint publicly; SQL text can contain sensitive literals.
