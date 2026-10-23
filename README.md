@@ -65,6 +65,8 @@ The browser does not connect directly to PostgreSQL. Keep the API bound to `127.
 6. Open [http://127.0.0.1:8000](http://127.0.0.1:8000). API docs are available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 7. Open **Database health** and find **Failed SQL statement capture**. Click **Refresh logs** to check ingestion status.
 
+<img width="2852" height="1642" alt="image" src="https://github.com/user-attachments/assets/6757c9dd-1ea6-4fb7-b4ee-851ee91baf1b" />
+
 ### Windows PowerShell
 
 ```powershell
