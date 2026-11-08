@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#101b2d" />
+  <title>PostgreSQL Incident Intelligence</title>
+  <link rel="stylesheet" href="/static/styles.css?v=0.3.0" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="Incident Intelligence home">
+        <span class="brand-mark"><span></span><span></span><span></span></span>
+        <span class="brand-copy"><strong>Incident Intelligence</strong><small>POSTGRESQL OPERATIONS</small></span>
+      </a>
+      <div class="sidebar-section-label">WORKSPACE</div>
+      <nav class="primary-nav" aria-label="Main navigation">
+        <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span><span>Overview</span></a>
+        <a class="nav-item" href="#incident-queue"><span class="nav-icon">◈</span><span>Incident queue</span><b class="nav-count" id="nav-open-count">0</b></a>
+        <a class="nav-item" href="#application-workloads"><span class="nav-icon">⌘</span><span>Applications</span></a>
+        <a class="nav-item" href="#recurrence"><span class="nav-icon">↗</span><span>Recurring patterns</span></a>
+        <a class="nav-item" href="#evidence"><span class="nav-icon">⌁</span><span>Evidence history</span></a>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-trust-card">
+        <div class="trust-icon">✓</div>
+        <div><strong>Evidence before explanation</strong><p>Observed facts, contextual signals and hypotheses stay clearly separated.</p></div>
+      </div>
+      <div class="sidebar-bottom">
+        <div class="local-indicator"><i></i><span>LOCAL WORKSPACE</span></div>
+        <div class="sidebar-version">VERSION <strong>0.3.0</strong></div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="breadcrumbs">Workspace <span>/</span> <strong>Operations overview</strong></div>
+        <div class="top-actions">
+          <div class="connection-pill" id="connection-pill"><i class="pulse-dot"></i><span id="connection-label">Connecting to PostgreSQL</span></div>
+          <button class="button button-primary" id="collect-now"><span class="button-icon">↻</span> Capture now</button>
+        </div>
+      </header>
+
+      <section class="hero" id="overview">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="eyebrow-line"></span> POSTGRESQL OPERATIONS / LIVE EVIDENCE</div>
+          <h1>Operations <em>command center</em></h1>
+          <p>Understand what is happening, spot operational risk and investigate incidents using evidence from your database.</p>
+          <div class="hero-meta"><span class="meta-chip"><i class="meta-dot"></i> Read-only collection</span><span class="meta-chip">Local evidence store</span><span class="meta-chip" id="hero-last-capture">Waiting for first capture</span></div>
+        </div>
+        <div class="hero-orbit" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit-core"><span>PG</span><i></i></div><span class="orbit-node node-a"></span><span class="orbit-node node-b"></span><span class="orbit-node node-c"></span></div>
+      </section>
+
+      <section class="database-strip" id="connection-banner">
+        <div class="db-left"><div class="db-icon"><span>DB</span><i></i></div><div class="db-title"><small>CONNECTED DATABASE</small><strong id="db-name">PostgreSQL connection pending</strong><span id="db-version">Configure DATABASE_URL in your .env file</span></div></div>
+        <div class="db-detail"><small>COLLECTOR INTERVAL</small><strong id="collector-interval">10 sec</strong></div>
+        <div class="db-detail"><small>QUERY TEXT CAPTURE</small><strong id="query-capture">Disabled</strong></div>
+        <div class="db-detail db-visibility"><small>STATISTICS VISIBILITY</small><strong id="db-visibility">Checking…</strong></div>
+        <div class="db-state" id="db-state"><i></i><span>Connecting</span></div>
+      </section>
+
+      <section class="section-block">
+        <div class="section-heading"><div><div class="eyebrow">CURRENT DATABASE SNAPSHOT</div><h2>At a glance</h2><p>Latest successfully collected PostgreSQL activity.</p></div><span class="section-caption" id="snapshot-time">NO SNAPSHOT YET</span></div>
+        <div class="metric-grid" aria-label="Current PostgreSQL metrics">
+          <article class="metric-card metric-blue"><div class="metric-card-head"><span class="metric-label">Client connections</span><span class="metric-icon">↔</span></div><div class="metric-value" id="metric-connections">—</div><div class="metric-bottom"><span id="metric-connection-pct">Waiting for data</span><span class="metric-context">of max_connections</span></div><div class="metric-progress"><span id="connection-progress"></span></div><div class="metric-footnote" id="connection-footnote">Utilization is based on visible client backends.</div></article>
+          <article class="metric-card metric-violet"><div class="metric-card-head"><span class="metric-label">Active sessions</span><span class="metric-icon">⌁</span></div><div class="metric-value" id="metric-active">—</div><div class="metric-bottom"><span id="active-subtitle">Currently executing</span><span class="metric-context">latest sample</span></div><div class="metric-spark" id="active-spark"></div><div class="metric-footnote">Sampled activity, not query throughput.</div></article>
+          <article class="metric-card metric-amber"><div class="metric-card-head"><span class="metric-label">Lock waiters</span><span class="metric-icon">⛓</span></div><div class="metric-value" id="metric-locks">—</div><div class="metric-bottom"><span id="lock-subtitle">Waiting on a lock</span><span class="metric-context">latest sample</span></div><div class="metric-spark" id="lock-spark"></div><div class="metric-footnote">Current sampled lock waits.</div></article>
+          <article class="metric-card metric-rose"><div class="metric-card-head"><span class="metric-label">Open incidents</span><span class="metric-icon">◇</span></div><div class="metric-value" id="metric-open-incidents">0</div><div class="metric-bottom"><span id="incident-subtitle">No active findings</span><span class="metric-context">rule-based</span></div><div class="metric-spark" id="incident-spark"></div><div class="metric-footnote">A rule finding is not a confirmed root cause.</div></article>
+        </div>
+      </section>
+
+      <section class="dashboard-grid section-block">
+        <article class="panel activity-panel">
+          <div class="panel-heading"><div><div class="eyebrow">DATABASE TELEMETRY</div><h2>Activity over time</h2><p>Connection count and active sessions across retained samples.</p></div><div class="chart-legend"><span><i class="legend-blue"></i> Connections</span><span><i class="legend-violet"></i> Active sessions</span></div></div>
+          <div class="chart-wrap"><svg id="trend-chart" viewBox="0 0 820 250" preserveAspectRatio="none" role="img" aria-label="PostgreSQL connection and active session trend"><text x="20" y="120" class="chart-empty">Waiting for historical samples…</text></svg></div>
+          <div class="panel-foot"><span id="chart-range">History builds as successful samples are collected.</span><span>LOCAL SQLITE EVIDENCE</span></div>
+        </article>
+        <article class="panel host-panel">
+          <div class="panel-heading"><div><div class="eyebrow">SYSTEM CONTEXT</div><h2>Collector host</h2><p>Resource signals from the machine running this app.</p></div><span class="scope-badge">HOST ONLY</span></div>
+          <div class="host-identity"><div class="host-avatar">⌘</div><div><strong id="host-name">Waiting for telemetry</strong><span id="host-platform">psutil telemetry status</span></div><span class="host-live" id="host-live">PENDING</span></div>
+          <div class="resource-list">
+            <div class="resource-item"><div class="resource-label"><span>CPU utilization</span><strong id="host-cpu-value">—</strong></div><div class="resource-track"><span id="host-cpu-bar"></span></div><div class="resource-sub" id="host-cpu-sub">Collector host only</div></div>
+            <div class="resource-item"><div class="resource-label"><span>Memory utilization</span><strong id="host-memory-value">—</strong></div><div class="resource-track"><span id="host-memory-bar"></span></div><div class="resource-sub" id="host-memory-sub">Collector host only</div></div>
+            <div class="resource-item"><div class="resource-label"><span>Root disk utilization</span><strong id="host-disk-value">—</strong></div><div class="resource-track"><span id="host-disk-bar"></span></div><div class="resource-sub" id="host-disk-sub">Collector host only</div></div>
+          </div>
+          <div class="host-disclaimer"><span>i</span><p>These are not PostgreSQL-server metrics unless the collector and database server are confirmed to run on the same host. No causal attribution is made.</p></div>
+        </article>
+      </section>
+
+      <section class="dashboard-grid section-block lower-grid">
+        <article class="panel workload-panel" id="application-workloads">
+          <div class="panel-heading"><div><div class="eyebrow">WORKLOAD ATTRIBUTION</div><h2>Application workloads</h2><p>Session activity grouped by PostgreSQL application_name.</p></div><span class="count-pill" id="application-count">0 APPS</span></div>
+          <div class="table-scroll"><table class="data-table"><thead><tr><th>APPLICATION</th><th>SESSIONS</th><th>ACTIVE</th><th>LOCK WAITS</th></tr></thead><tbody id="application-rows"><tr><td colspan="4" class="empty-state">Application workload data will appear after collection.</td></tr></tbody></table></div>
+          <div class="panel-note">Unnamed connections are grouped together. Application names are client-supplied metadata and may not uniquely identify a service.</div>
+        </article>
+        <article class="panel patterns-panel" id="recurrence">
+          <div class="panel-heading"><div><div class="eyebrow">OPERATIONAL MEMORY</div><h2>Recurring patterns</h2><p>Incident records created in the last seven days.</p></div><span class="count-pill">7 DAYS</span></div>
+          <div class="pattern-list" id="pattern-list"><div class="empty-state">Recurring patterns will appear as incident history builds.</div></div>
+          <div class="panel-note">Counts represent separate incident records, not the number of individual query executions.</div>
+        </article>
+      </section>
+
+      <section class="panel incident-panel section-block" id="incident-queue">
+        <div class="panel-heading incident-heading"><div><div class="eyebrow">INVESTIGATION WORK QUEUE</div><h2>Incidents</h2><p>Open a finding to inspect its evidence, surrounding timeline and investigation hypotheses.</p></div><div class="filter-control"><label for="incident-filter">SHOW</label><select id="incident-filter"><option value="open">Open incidents</option><option value="all">All history</option><option value="resolved">Resolved only</option></select></div></div>
+        <div class="table-scroll"><table class="data-table incident-table"><thead><tr><th>INCIDENT</th><th>SEVERITY</th><th>STATUS</th><th>FIRST OBSERVED</th><th>LAST OBSERVED</th><th>OBSERVATIONS</th><th></th></tr></thead><tbody id="incident-rows"><tr><td colspan="7" class="empty-state">No incidents yet. Run a controlled test scenario to create evidence.</td></tr></tbody></table></div>
+      </section>
+
+      <section class="panel evidence-panel section-block" id="evidence">
+        <div class="panel-heading"><div><div class="eyebrow">CAPTURED SOURCE RECORDS</div><h2>Evidence history</h2><p>Recent snapshots stored locally by the collector.</p></div><span class="live-status" id="evidence-collector-status"><i></i> CONNECTING</span></div>
+        <div class="evidence-list" id="evidence-list"><div class="empty-state">No evidence captured yet.</div></div>
+      </section>
+      <footer class="page-footer"><span>PostgreSQL Incident Intelligence <b>v0.3.0</b></span><span>Read-only PostgreSQL collection · Local evidence storage · Hypotheses are not confirmed causes</span></footer>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="modal-backdrop" id="modal-backdrop" hidden>
+    <section class="detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+      <div class="modal-header"><div><div class="eyebrow">INCIDENT INVESTIGATION / EVIDENCE FIRST</div><h2 id="detail-title">Incident details</h2><p id="detail-subtitle">Review observed facts before assessing likely causes.</p></div><button class="icon-button" id="close-modal" aria-label="Close investigation">×</button></div>
+      <div id="detail-body" class="detail-body"></div>
+      <div class="modal-actions"><span class="modal-integrity">Generated from locally retained evidence</span><div><button class="button button-secondary" id="download-report">Download RCA report</button><button class="button button-primary" id="close-modal-bottom">Close investigation</button></div></div>
+    </section>
+  </div>
+
+  <script src="/static/dashboard.js?v=0.3.0"></script>
+</body>
+</html>

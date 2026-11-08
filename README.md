@@ -1,183 +1,288 @@
-# DB Incident Replay
+# PostgreSQL Incident Intelligence
 
-**A local-first PostgreSQL incident flight recorder for DBAs and database support engineers.**
+**Local MVP — version 0.3.0**
 
-DB Incident Replay connects a Python API and browser dashboard to a local PostgreSQL instance. It displays live diagnostic evidence, including active sessions, blocking relationships, and connection counts; periodically samples selected signals; stores local SQLite history; and supports manual timestamped evidence snapshots. Version 0.5 adds recent failed-SQL evidence ingestion from the active PostgreSQL server log.
+A local-first PostgreSQL incident evidence collector and investigation dashboard. It connects to a real PostgreSQL database using a read-only session, samples live database activity, stores snapshots in a separate local SQLite evidence store, detects a small set of operational conditions, and generates a Markdown incident report.
 
-> **Project status:** learning/portfolio prototype. This version is not production-ready or a complete monitoring platform. Findings are diagnostic clues, not guaranteed root-cause conclusions.
+This is deliberately an evidence-first MVP. It does not claim to prove root cause automatically.
 
-## Current capabilities
+## Upgrade existing installations without losing local history
 
-- FastAPI/Uvicorn API and browser dashboard.
-- Read-only diagnostics for current activity, blocking relationships, and connection counts.
-- Automatic sampling (default 15 seconds) for sessions, blockers, long-running queries, long idle-in-transaction sessions, connection distribution, and selected database counters.
-- Seven-day retention of automatic samples in local SQLite; manual snapshots and event history are retained separately in this version.
-- Threshold-based incident events and an incident timeline.
-- Manual timestamped evidence snapshots with diagnostic payloads.
-- Failed SQL ingestion from the recent tail of the active PostgreSQL log (v0.5): parses ERROR, FATAL, and PANIC entries and nearby DETAIL, HINT, and STATEMENT lines when available.
-- Dashboard panel under **Database health → Failed SQL statement capture**, with ingestion status and refresh control.
-- `GET /api/diagnostics/failed-queries?limit=10` endpoint.
-- Optional `PG_LOG_FILE` override and `PG_LOG_TAIL_BYTES` scan limit (default 2 MiB; maximum 10 MiB).
-- SQL lab scripts for reproducing a blocking incident.
+Stop the running application with `Ctrl+C`. Back up the existing `.env` and the SQLite evidence database before replacing code. The v0.3.0 archive intentionally excludes `.env`, `data/`, and local secrets/history. Extract the archive into the parent directory containing your existing `postgresql-incident-intelligence` folder and allow code files to be overwritten. Your existing `.env` and `data/incident_intelligence.sqlite3` should remain in place. Restart with the same virtual environment using `python -m incident_intelligence`.
 
-## Known limitations
+The current v0.3.0 update performs an additive SQLite migration for new host-metric and application-summary JSON fields. Existing `samples` and `incidents` rows are retained. Older samples receive empty defaults for the new context, so they will not show retroactive host or application metrics.
 
-- Only the active log file's recent tail is scanned; rotated/archived logs are not ingested.
-- Multiline statement association and historical coverage are not guaranteed. Polling can miss events shorter than the sampling interval.
-- This is not a complete audit trail, full query-performance root-cause analyzer, or automated remediation tool.
-- No multi-tenant authentication, enterprise secret management, or production deployment hardening.
+## What this MVP does
 
-## Architecture
+- Connects to the PostgreSQL database specified in `.env`.
+- Uses a PostgreSQL session forced to `default_transaction_read_only=on`, with short statement and lock timeouts.
+- Samples client connections, active/idle sessions, idle-in-transaction sessions, lock waiters, database size, streaming replica count and primary-to-replica replay distance.
+- Records selected session metadata and `pg_blocking_pids()` evidence.
+- Optionally samples the top cumulative `pg_stat_statements` entries when explicitly enabled.
+- Stores the evidence locally in SQLite (`data/incident_intelligence.sqlite3` by default). It does not create tables in the monitored PostgreSQL database.
+- Detects: high connection-slot utilization, lock waits, long-running active statements, idle-in-transaction sessions, replica replay distance above a configured byte threshold, and an increase in the database deadlock counter between samples.
+- Opens, updates and resolves incidents as conditions appear and disappear in successful samples.
+- Builds an incident timeline from retained pre-incident, active-incident and post-incident samples.
+- Compares sampled connection, activity, lock, transaction, database-size and replica-distance metrics before, during and after each incident.
+- Generates deterministic, rule-specific investigation hypotheses with supporting evidence, missing/alternative evidence and recommended next checks.
+- Discloses collection gaps, missing baselines, query-text capture status and the limits of available application/host context.
+- Explicitly marks business impact as not measured until application or business telemetry is integrated.
+- Exports a richer Markdown RCA investigation report with timeline, comparison, hypotheses and evidence-coverage sections.
 
-```mermaid
-flowchart TD
-    A[Browser dashboard] -->|HTTP localhost| B[FastAPI API + collector]
-    B -->|Read-only diagnostic SQL| C[(PostgreSQL incident_lab)]
-    B --> D[(SQLite samples, events, snapshots)]
-    B -->|Read active log tail| E[PostgreSQL server log]
-    F[SQL lab scripts] --> C
-```
+## What it does not do yet
 
-The browser does not connect directly to PostgreSQL. Keep the API bound to `127.0.0.1`; do not expose this prototype to the internet.
+- It cannot reconstruct incidents that happened before collection started.
+- A 10-second sampling interval can miss events shorter than the interval.
+- It does not yet ingest PostgreSQL server log files, application traces, deployment events or ticket history. Collector-host metrics are not remote PostgreSQL-host metrics.
+- It does not prove that a database condition caused an application incident; the new investigation hypotheses are not confirmed root causes.
+- It does not execute remediation SQL or change PostgreSQL configuration.
+- It is a single-user local MVP, not a multi-tenant production service.
+- It does not yet implement a complete `pg_stat_statements` historical-delta analysis or explain-plan regression engine.
 
 ## Requirements
 
-- macOS, Linux, or Windows
-- Python 3.10+ (Python 3.11/3.12 recommended)
-- Local PostgreSQL and `psql` or pgAdmin
-- Git (optional, for development)
+- Python 3.10+ (Python 3.12 is a good choice).
+- PostgreSQL 12+ recommended. The first development target is PostgreSQL 17.
+- A PostgreSQL role that can connect to the target database and preferably is a member of the built-in `pg_monitor` role.
 
-## Quick start — macOS/Linux
+## 1. Create a dedicated local test database
 
-1. Install PostgreSQL from the [official download page](https://www.postgresql.org/download/).
-2. As a local PostgreSQL administrator, run `CREATE DATABASE incident_lab;` by itself from `sql/01_setup.sql` (or create the database through pgAdmin).
-3. Connect to `incident_lab` and run the remaining role/table/grant statements in `sql/01_setup.sql`. Review the SQL before executing it and set a strong local password instead of the placeholder.
-4. Copy `.env.example` to `.env`; set `DB_PASSWORD` to the password for `incident_reader` and adjust connection values for your local installation. Never commit `.env`.
-5. From the project root:
+Do not run the deliberately blocking test scenarios against production. Create a disposable database for this product:
 
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   python3 -m pip install -r requirements.txt
-   python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-   ```
-
-6. Open [http://127.0.0.1:8000](http://127.0.0.1:8000). API docs are available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
-7. Open **Database health** and find **Failed SQL statement capture**. Click **Refresh logs** to check ingestion status.
-
-Documentation Link : https://pgsql-sphinx-docs.readthedocs.io/en/latest/
-
-
-<img width="2852" height="1642" alt="image" src="https://github.com/user-attachments/assets/6757c9dd-1ea6-4fb7-b4ee-851ee91baf1b" />
-
-### Windows PowerShell
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```bash
+# Create this isolated test database once (skip createdb if it already exists).
+createdb incident_intelligence_lab
+psql -d incident_intelligence_lab -f sql/create_test_lab.sql
 ```
 
-If PowerShell activation is blocked, use Command Prompt with `.venv\Scriptsctivate.bat`.
+If your local PostgreSQL service is not running, start it first. On a Homebrew installation, the service name depends on the installed major version; for example:
 
-## PostgreSQL role creation and permissions
+```bash
+brew services list
+brew services start postgresql@17
+```
 
-Run the setup SQL as a PostgreSQL administrator, not as the application user. The supplied `sql/01_setup.sql` creates the `incident_reader` login, grants connection and demo-table access, and grants the monitoring permissions used by this local prototype. Review the exact permissions against the app's query requirements before reusing them elsewhere.
+Confirm the server and database are available:
 
-The v0.5 failed-log discovery calls `pg_catalog.pg_current_logfile()`. Depending on PostgreSQL version and role configuration, the application login may need permission to execute that function and monitoring privileges. The local lab setup includes:
+```bash
+psql -d incident_intelligence_lab -c "SELECT version(), current_database(), current_user;"
+```
+
+## 2. Create a monitoring login (recommended)
+
+Use a separate account rather than a personal application login. Run the following as a PostgreSQL administrator, replacing the sample password with a strong local password:
 
 ```sql
-GRANT pg_monitor TO incident_reader;
-GRANT EXECUTE ON FUNCTION pg_catalog.pg_current_logfile() TO incident_reader;
+CREATE ROLE incident_monitor LOGIN PASSWORD 'REPLACE_WITH_A_STRONG_PASSWORD';
+GRANT pg_monitor TO incident_monitor;
+GRANT CONNECT ON DATABASE incident_intelligence_lab TO incident_monitor;
 ```
 
-`pg_monitor` is a predefined monitoring role with broader visibility than a simple table reader. Grant it only to a trusted local lab account after reviewing its implications. Do not use a superuser login for routine application monitoring. The application process must also be able to read the selected log file at the operating-system level if it reads the file directly; do not make PostgreSQL logs world-readable to solve access problems.
+The built-in `pg_monitor` role provides monitoring/statistics visibility. It does not make the login a superuser and is not a grant to modify application tables. Review PostgreSQL's role documentation and your organization's access policy before granting it in any shared environment.
 
-## Configure PostgreSQL server logging
+For a local-only test, you can use your existing local superuser. The collector still forces its own PostgreSQL session into read-only mode, but a dedicated monitoring login is a better test of intended deployment permissions.
 
-The server must log errors for failed SQL to be captured. Review [`docs/postgres-logging.md`](docs/postgres-logging.md) and your installed PostgreSQL version before changing settings. Typical local-lab settings include:
+## 3. Configure the connection
 
-```conf
-logging_collector = on
-log_destination = 'stderr'
-log_directory = 'log'
-log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
-log_min_error_statement = error
-log_line_prefix = '%m [%p] user=%u db=%d app=%a client=%h '
+From this project directory:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cp .env.example .env
 ```
 
-`logging_collector` generally requires a restart when changed; other settings may be reloadable. Check `pg_settings` and the documentation for your version. Do not blindly apply settings to production. SQL/error logs may contain secrets or personal data; limit access, retention, and sharing.
+Edit `.env` and set `DATABASE_URL`. Example:
 
-If active log discovery is unavailable, set `PG_LOG_FILE` in `.env` to an absolute path that the application process can read. `PG_LOG_TAIL_BYTES` controls the recent-tail scan size. Restart the API after changing `.env`.
+```dotenv
+DATABASE_URL=postgresql://incident_monitor:YOUR_PASSWORD@127.0.0.1:5432/incident_intelligence_lab
+```
 
-## Verify failed-SQL ingestion (v0.5)
+If your local PostgreSQL uses a different username, password, port or authentication method, change the URL accordingly. Do not commit `.env` to Git; it is ignored by `.gitignore`.
 
-1. Start PostgreSQL with server error logging configured and start the API.
-2. In a test database session, run a harmless failing query against a nonexistent table:
+Recommended initial settings:
 
-   ```sql
-   SELECT * FROM incident_replay_test_table_missing;
-   ```
+```dotenv
+COLLECT_INTERVAL_SECONDS=10
+LONG_QUERY_SECONDS=30
+IDLE_TRANSACTION_SECONDS=60
+CONNECTION_WARNING_PCT=80
+CONNECTION_CRITICAL_PCT=95
+CAPTURE_QUERY_TEXT=false
+ENABLE_PG_STAT_STATEMENTS=false
+```
 
-3. Request recent parsed errors:
+**Privacy default:** SQL text is not saved. The product can still detect query duration and lock waits from metadata. Enable `CAPTURE_QUERY_TEXT=true` only in a controlled environment after considering whether SQL may contain personal data, literals, tokens or other sensitive values. SQL text is saved in the local SQLite evidence database when enabled.
 
-   ```bash
-   curl -s "http://127.0.0.1:8000/api/diagnostics/failed-queries?limit=10"
-   ```
+## 4. Start the product
 
-4. Confirm the response has `"status":"ok"`, `"ingestion_enabled":true`, and an item containing `incident_replay_test_table_missing`.
-5. In the dashboard, open **Database health → Failed SQL statement capture** and click **Refresh logs**.
+After configuring `.env`, run the launcher (it creates the virtual environment and installs requirements if needed):
 
-The endpoint may include SQL literals. Keep it local/private and sanitize output before sharing it. This parser reads the active log's recent tail only; it does not guarantee complete history or robust parsing of all multiline statements.
+```bash
+chmod +x start.sh
+./start.sh
+```
 
-## Automatic sampling and incident history (v0.4)
+Or, with the virtual environment already active:
 
-- `AUTO_MONITOR=true` enables the background collector.
-- `MONITOR_INTERVAL_SECONDS` controls the interval (default 15 seconds; minimum 10 seconds).
-- `LONG_QUERY_SECONDS` is the long-running query threshold (default 30 seconds).
-- `IDLE_TXN_SECONDS` is the idle-in-transaction threshold (default 60 seconds).
-- Automatic samples are retained for seven days in `data/incident_history.sqlite3`; manual snapshots and event history are not pruned automatically in this version.
-- API routes include `/api/monitor/status`, `/api/monitor/latest`, `/api/monitor/history`, and `/api/events`.
+```bash
+python -m incident_intelligence
+```
 
-## First demo: reproduce a blocking incident
+Open:
 
-See [`docs/incident-scenarios.md`](docs/incident-scenarios.md). In summary, use two sessions: in Session A begin a transaction and update `demo_accounts.account_id = 1` without committing; in Session B update the same row and leave it waiting. Run dashboard diagnostics and capture evidence, then `COMMIT;` in Session A and confirm the waiting update finishes. Use only the disposable synthetic lab database.
+```text
+http://127.0.0.1:8000
+```
 
-## Troubleshooting
+The collector begins sampling automatically. The first snapshot appears after a successful connection. Keep this terminal running while you create test scenarios in other terminals.
 
-See [`docs/troubleshooting.md`](docs/troubleshooting.md). Common issues include connection refused, password authentication failures, missing roles/database, missing Python modules, inability to discover/read the active log, and permission errors for `pg_current_logfile()`.
+The API documentation is available locally at:
 
-## Security and data handling
+```text
+http://127.0.0.1:8000/docs
+```
 
-- Use only a disposable local database with synthetic data.
-- `.env`, `.venv/`, Python caches, logs, and local `data/` evidence are ignored by Git. Never commit passwords, customer data, production logs, tokens, or private hostnames.
-- Keep the API bound to `127.0.0.1`; do not expose it publicly.
-- SQL text, error details, connection metadata, and SQLite history can contain sensitive information. Review/redact before sharing.
-- Do not connect this prototype to employer/customer production systems without explicit authorization and a security review.
-- See [`SECURITY.md`](SECURITY.md).
+## 5. Run real incident scenarios
 
-## Roadmap
+Open separate terminals and connect each one to `incident_intelligence_lab` using `psql`. Follow [`docs/test-scenarios.md`](docs/test-scenarios.md) in order:
 
-See [`docs/roadmap.md`](docs/roadmap.md). Implemented capabilities include periodic sampling, local incident history, manual snapshots, the timeline, and v0.5 failed-SQL ingestion. Potential future work includes rotated-log ingestion, stronger SQL redaction, richer incident replay, and retention controls.
+1. Long-running query: `SELECT pg_sleep(45);`
+2. Idle in transaction: `BEGIN;` then a `SELECT`, leave it open for over 60 seconds.
+3. Blocking transaction: Session A updates account 1 and remains uncommitted; Session B updates the same row and waits.
+4. Optional controlled connection pressure and deadlock tests.
 
-## Demo evidence for your portfolio
+Expected product behaviour:
 
-Add sanitized screenshots under `docs/screenshots/`: dashboard before the incident, blocked session, blocker/blocked PIDs, independent PostgreSQL verification, and dashboard after the blocker clears. Use only synthetic lab data.
+- The incident appears after a sample observes the configured condition.
+- The incident records first-seen, last-seen and observation count.
+- The incident resolves after a later successful sample no longer observes that condition.
+- Clicking a finding opens its captured details.
+- The Markdown RCA report distinguishes observed evidence from hypotheses.
 
-## Technology stack
+Do not expect the product to show evidence for a test that completed between collection polls. Increase sampling frequency for a controlled test if needed, while keeping the collection load reasonable.
 
-- PostgreSQL and SQL
-- Python, FastAPI, Uvicorn
-- HTML, CSS, JavaScript
-- SQLite, Git, and GitHub
+## 6. Incident investigation workspace (v0.2.0 foundation)
 
-## License
+Click an incident in the table to open its investigation workspace. It now includes:
 
-MIT License. See [`LICENSE`](LICENSE).
+- **What we know:** the original rule summary and captured session details.
+- **Incident timeline:** nearby baseline samples, each sampled rule observation, samples where the rule was not detected, and the rule-clearance timestamp when resolved.
+- **Before / during / after:** the last sampled value for each metric in each period, plus sample counts. The comparison uses retained snapshots, not a continuous measurement.
+- **Investigation hypotheses:** deterministic rule-specific possibilities, each labeled as a hypothesis with supporting evidence, missing or alternative evidence, and recommended next checks.
+- **Evidence coverage:** counts of samples in each period, estimated sample cadence, collection gaps, and query-text capture state.
+- **Business impact:** explicitly marked not measured because application traces, user/request outcomes and business telemetry are not integrated yet.
 
-## Author
+Download the Markdown RCA report from the same workspace. It includes the timeline, comparison, hypotheses, evidence gaps and impact limitation.
 
-**Kiran Kambale** — PostgreSQL Database Engineer / Database Support
+The timeline only shows events that were actually captured. A condition not detected in a later sample means that rule did not trigger in that sample; it does not prove the application issue was resolved. A blocker PID is correlated to blocker-session details only within the same sample to avoid incorrectly joining a reused PostgreSQL PID from another time.
 
-This is an independent portfolio project and is not affiliated with or endorsed by any employer.
+## 7. Recommended test sequence
+
+Start with defaults. Run the long query, idle transaction and blocking-session scenarios one at a time. For each test:
+
+1. Record the time you start the test.
+2. Wait until the finding appears.
+3. Open the finding and verify the observed PID, state, threshold and blockers where relevant.
+4. Stop the test cleanly (`ROLLBACK` for open transactions).
+5. Wait for the incident to resolve.
+6. Download its Markdown report and inspect evidence coverage and limitations.
+
+For a proper validation exercise, compare the dashboard's observations with `pg_stat_activity`, `pg_blocking_pids()` and PostgreSQL logs from the same time.
+
+## 8. Data and privacy
+
+- PostgreSQL is queried; the product does not create or modify application tables.
+- The collector uses an explicitly read-only PostgreSQL session and a short statement timeout.
+- The local SQLite store contains operational metadata, timestamps, session identifiers, application names and rule details. Query text is omitted by default.
+- `CAPTURE_QUERY_TEXT=true` and optional `pg_stat_statements` text capture can persist SQL text locally. Treat the SQLite file as potentially sensitive if either is enabled.
+- The web application binds to `127.0.0.1`, not all network interfaces. Do not expose it to a network without adding authentication, TLS, CSRF protection, tenant isolation and a security review.
+- The `.env` file contains credentials and must remain private.
+
+## 9. Configuration
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `DATABASE_URL` | empty | PostgreSQL connection URL |
+| `COLLECT_INTERVAL_SECONDS` | `10` | Sample interval; values below 5 are raised to 5 |
+| `LONG_QUERY_SECONDS` | `30` | Active query duration threshold |
+| `IDLE_TRANSACTION_SECONDS` | `60` | Idle-in-transaction age threshold |
+| `CONNECTION_WARNING_PCT` | `80` | Connection-slot warning threshold |
+| `CONNECTION_CRITICAL_PCT` | `95` | Critical connection-slot threshold |
+| `REPLICATION_LAG_WARNING_BYTES` | `104857600` | Replay distance threshold (100 MiB) on a primary |
+| `CAPTURE_QUERY_TEXT` | `false` | Opt-in SQL text persistence |
+| `ENABLE_PG_STAT_STATEMENTS` | `false` | Opt-in top cumulative statement sampling |
+| `EVIDENCE_DB_PATH` | `./data/incident_intelligence.sqlite3` | Local evidence database path |
+
+## 10. Development checks
+
+```bash
+pytest -q
+python -m compileall -q incident_intelligence tests
+```
+
+The automated suite covers detection rules, incident persistence, the investigation analysis, report export and the detail/report API handlers. It does not replace integration tests against your own PostgreSQL server.
+
+## 11. Troubleshooting
+
+**Connection refused** — confirm PostgreSQL is running, host and port are correct, and the database exists.
+
+**Password authentication failed** — verify the role password and `pg_hba.conf` authentication method. Do not weaken authentication globally just to make the MVP connect.
+
+**Limited visibility warning** — use a dedicated role and grant membership in `pg_monitor` according to your security policy. Without sufficient statistics privileges, PostgreSQL may hide other users' query/session details.
+
+**No incident appears** — confirm the target `.env` points to the database used by your test sessions, wait for the configured threshold plus one collection interval, and check the collector status banner. Historical evidence starts only after the app connects.
+
+**Optional pg_stat_statements unavailable** — the extension must be installed and loaded according to PostgreSQL's `shared_preload_libraries` requirements, created in the connected database, and readable by the monitoring role. This optional feature does not stop the main collector.
+
+**Reset the local evidence store** — stop the app and remove `data/incident_intelligence.sqlite3` (and its `-wal` / `-shm` files if present). This permanently deletes local captured history and incidents.
+
+## Architecture
+
+```text
+PostgreSQL (read-only sampling)
+  ├─ pg_stat_activity / pg_blocking_pids
+  ├─ pg_stat_database
+  ├─ pg_stat_replication (primary only)
+  └─ optional pg_stat_statements
+          |
+          v
+Python collector + deterministic detection rules
+          |
+          v
+Local SQLite evidence store
+          |
+          v
+FastAPI + local dashboard + Markdown incident reports
+```
+
+This is a validation MVP, not a production-ready commercial platform. Before customer deployment, add authentication, tenant isolation, managed secrets, encrypted evidence storage, collector health monitoring, retention controls, structured database-log ingestion, application/host integrations, backup/restore validation, load testing and a formal security review.
+
+
+## PostgreSQL documentation used for the collector design
+
+- [PostgreSQL 17 — Monitoring Database Activity](https://www.postgresql.org/docs/17/monitoring-stats.html): `pg_stat_activity`, dynamic statistics and `pg_read_all_stats` visibility.
+- [PostgreSQL 17 — pg_stat_statements](https://www.postgresql.org/docs/17/pgstatstatements.html): extension loading, cumulative statement statistics and query identifiers.
+- [PostgreSQL 17 — Predefined Roles](https://www.postgresql.org/docs/17/predefined-roles.html): privileges provided by `pg_monitor`.
+
+
+## v0.3.0 — Cross-layer operational context
+
+The v0.3.0 release extends the v0.2.0 incident investigation workspace. It includes:
+
+- Lightweight collector-host CPU, memory, root-volume usage and disk I/O rate samples (using `psutil`). These describe the machine running this collector only; they are not represented as PostgreSQL server metrics unless host identity is independently verified.
+- Application workload summaries grouped by PostgreSQL `application_name`, including session, active-session, lock-wait and idle-in-transaction counts. Application names are client-supplied labels and are not guaranteed to identify a service uniquely.
+- Cross-layer incident context that aligns application and collector-host observations with samples that triggered a rule. Temporal overlap is contextual evidence, not proof of causation.
+- Seven-day recurring incident pattern summaries based on distinct stored incident records.
+- Additive SQLite migrations for the new telemetry fields. Existing incident history is retained; older samples display empty host/application context.
+- An upgraded operations dashboard with activity charts, collector-host resource panels, application workloads, recurrence summaries, incident work queue and detailed investigation views.
+
+### Host telemetry boundary
+
+The collector runs on the same machine as the FastAPI application. If PostgreSQL is remote, `psutil` values describe the collector machine, not the database server. To obtain database-server CPU, memory and disk telemetry for a remote PostgreSQL host, install a separate authorized host agent or integrate an existing host-monitoring API. This release does not claim to collect remote database-host metrics.
+
+### v0.3.0 update
+
+See [`docs/upgrade-v0.3.0.md`](docs/upgrade-v0.3.0.md). The upgrade is additive and does not require deleting the local SQLite database. Back up `.env` and `data/incident_intelligence.sqlite3` before replacing code. Install the updated Python requirements so `psutil` is available.
