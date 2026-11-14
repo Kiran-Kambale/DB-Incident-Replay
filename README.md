@@ -6,38 +6,87 @@ A local-first PostgreSQL incident evidence collector and investigation dashboard
 
 This is deliberately an evidence-first MVP. It does not claim to prove root cause automatically.
 
-## Upgrade existing installations without losing local history
+## Installation
 
-Stop the running application with `Ctrl+C`. Back up the existing `.env` and the SQLite evidence database before replacing code. The v0.3.0 archive intentionally excludes `.env`, `data/`, and local secrets/history. Extract the archive into the parent directory containing your existing `postgresql-incident-intelligence` folder and allow code files to be overwritten. Your existing `.env` and `data/incident_intelligence.sqlite3` should remain in place. Restart with the same virtual environment using `python -m incident_intelligence`.
+You can run PostgreSQL Incident Intelligence using either of the following methods:
 
-The current v0.3.0 update performs an additive SQLite migration for new host-metric and application-summary JSON fields. Existing `samples` and `incidents` rows are retained. Older samples receive empty defaults for the new context, so they will not show retroactive host or application metrics.
+- **Option 1: Docker Installation** – Recommended for quick setup. No need to install Python, PostgreSQL, or application dependencies manually.
+- **Option 2: Manual Installation** – Set up the application and PostgreSQL environment yourself.
 
-## What this MVP does
+---
 
-- Connects to the PostgreSQL database specified in `.env`.
-- Uses a PostgreSQL session forced to `default_transaction_read_only=on`, with short statement and lock timeouts.
-- Samples client connections, active/idle sessions, idle-in-transaction sessions, lock waiters, database size, streaming replica count and primary-to-replica replay distance.
-- Records selected session metadata and `pg_blocking_pids()` evidence.
-- Optionally samples the top cumulative `pg_stat_statements` entries when explicitly enabled.
-- Stores the evidence locally in SQLite (`data/incident_intelligence.sqlite3` by default). It does not create tables in the monitored PostgreSQL database.
-- Detects: high connection-slot utilization, lock waits, long-running active statements, idle-in-transaction sessions, replica replay distance above a configured byte threshold, and an increase in the database deadlock counter between samples.
-- Opens, updates and resolves incidents as conditions appear and disappear in successful samples.
-- Builds an incident timeline from retained pre-incident, active-incident and post-incident samples.
-- Compares sampled connection, activity, lock, transaction, database-size and replica-distance metrics before, during and after each incident.
-- Generates deterministic, rule-specific investigation hypotheses with supporting evidence, missing/alternative evidence and recommended next checks.
-- Discloses collection gaps, missing baselines, query-text capture status and the limits of available application/host context.
-- Explicitly marks business impact as not measured until application or business telemetry is integrated.
-- Exports a richer Markdown RCA investigation report with timeline, comparison, hypotheses and evidence-coverage sections.
+### Option 1: Docker Installation (Recommended)
 
-## What it does not do yet
+The easiest way to get started is with Docker Compose. It automatically starts the application and its PostgreSQL database.
 
-- It cannot reconstruct incidents that happened before collection started.
-- A 10-second sampling interval can miss events shorter than the interval.
-- It does not yet ingest PostgreSQL server log files, application traces, deployment events or ticket history. Collector-host metrics are not remote PostgreSQL-host metrics.
-- It does not prove that a database condition caused an application incident; the new investigation hypotheses are not confirmed root causes.
-- It does not execute remediation SQL or change PostgreSQL configuration.
-- It is a single-user local MVP, not a multi-tenant production service.
-- It does not yet implement a complete `pg_stat_statements` historical-delta analysis or explain-plan regression engine.
+**Prerequisites**
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+- Git installed (if cloning the repository).
+
+**Step 1: Clone the repository**
+
+```bash
+git clone https://github.com/Kiran-Kambale/DB-Incident-Replay.git
+cd DB-Incident-Replay
+```
+
+**Step 2: Configure your credentials**
+
+Open `docker-compose.yml`.
+
+Update the PostgreSQL password in both places:
+
+```yaml
+POSTGRES_PASSWORD: ChangeThisPassword123!
+```
+
+And in the application's database connection string:
+
+```yaml
+DATABASE_URL: postgresql://postgres:ChangeThisPassword123!@db:5432/incident_lab
+```
+
+Use the same strong, unique password in both places.
+
+**Step 3: Start the application**
+
+Run:
+
+```bash
+docker compose -f docker-compose.yml up -d 
+
+```
+
+Docker Compose will download the required images, create the containers, configure the network, and start the application and PostgreSQL database.
+
+**Step 4: Open the dashboard**
+
+Once the containers are running, open:
+
+**http://localhost:8000**
+
+That's it! PostgreSQL Incident Intelligence is ready for local evaluation.
+
+**Useful Docker Commands**
+
+| Command | Purpose |
+|---|---|
+| `docker compose ps` | Check container status |
+| `docker compose logs -f app` | View application logs |
+| `docker compose logs -f db` | View PostgreSQL logs |
+| `docker compose restart` | Restart services |
+| `docker compose stop` | Stop services |
+| `docker compose up -d` | Start services again |
+| `docker compose down` | Stop and remove containers |
+
+**Important:** Your incident history and PostgreSQL data are stored in Docker volumes. Do not use `docker compose down -v` unless you intentionally want to delete those volumes and their data.
+
+---
+
+### Option 2: Manual Installation
+
+---
 
 ## Requirements
 
@@ -51,8 +100,8 @@ Do not run the deliberately blocking test scenarios against production. Create a
 
 ```bash
 # Create this isolated test database once (skip createdb if it already exists).
-createdb incident_intelligence_lab
-psql -d incident_intelligence_lab -f sql/create_test_lab.sql
+createdb incident_lab
+psql -d incident_lab -f sql/create_test_lab.sql
 ```
 
 If your local PostgreSQL service is not running, start it first. On a Homebrew installation, the service name depends on the installed major version; for example:
@@ -65,7 +114,7 @@ brew services start postgresql@17
 Confirm the server and database are available:
 
 ```bash
-psql -d incident_intelligence_lab -c "SELECT version(), current_database(), current_user;"
+psql -d incident_lab -c "SELECT version(), current_database(), current_user;"
 ```
 
 ## 2. Create a monitoring login (recommended)
@@ -75,7 +124,7 @@ Use a separate account rather than a personal application login. Run the followi
 ```sql
 CREATE ROLE incident_monitor LOGIN PASSWORD 'REPLACE_WITH_A_STRONG_PASSWORD';
 GRANT pg_monitor TO incident_monitor;
-GRANT CONNECT ON DATABASE incident_intelligence_lab TO incident_monitor;
+GRANT CONNECT ON DATABASE incident_lab TO incident_monitor;
 ```
 
 The built-in `pg_monitor` role provides monitoring/statistics visibility. It does not make the login a superuser and is not a grant to modify application tables. Review PostgreSQL's role documentation and your organization's access policy before granting it in any shared environment.
@@ -97,7 +146,7 @@ cp .env.example .env
 Edit `.env` and set `DATABASE_URL`. Example:
 
 ```dotenv
-DATABASE_URL=postgresql://incident_monitor:YOUR_PASSWORD@127.0.0.1:5432/incident_intelligence_lab
+DATABASE_URL=postgresql://incident_monitor:YOUR_PASSWORD@127.0.0.1:5432/incident_lab
 ```
 
 If your local PostgreSQL uses a different username, password, port or authentication method, change the URL accordingly. Do not commit `.env` to Git; it is ignored by `.gitignore`.
